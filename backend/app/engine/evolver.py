@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from . import llm
@@ -110,14 +111,29 @@ Reply with exactly this JSON shape (all fields required):
  "root_cause": "...",
  "change_summary": "...",
  "new_prompt": "..."}"""
-        completion = await llm.openai_client().chat.completions.create(
-            model=llm.EVOLVER_MODEL,
-            max_tokens=8000,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        if completion.choices[0].finish_reason == "length":
-            raise EvolverError("The evolver ran out of tokens before finishing.")
-        text = (completion.choices[0].message.content or "").strip()
+        # The gateway can't enforce a JSON schema, so parse leniently and, if the reply
+        # still isn't valid JSON, ask once more with the parse error.
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        for attempt in range(2):
+            completion = await llm.openai_client().chat.completions.create(
+                model=llm.EVOLVER_MODEL, max_tokens=12000, messages=messages
+            )
+            if completion.choices[0].finish_reason == "length":
+                raise EvolverError("The evolver ran out of tokens before finishing.")
+            text = (completion.choices[0].message.content or "").strip()
+            try:
+                return _validate(_parse_json(text))
+            except ValueError as e:
+                log.warning("Evolver reply was not valid JSON (attempt %d): %s; reply starts: %r", attempt + 1, e, text[:300])
+                messages += [
+                    {"role": "assistant", "content": text or "(empty)"},
+                    {
+                        "role": "user",
+                        "content": f"That reply was not valid JSON ({e}). Reply again with ONLY the JSON object: "
+                        "no prose, no code fences, and write line breaks inside strings as \\n.",
+                    },
+                ]
+        raise EvolverError("The evolver did not return valid JSON (after a retry).")
     else:
         response = await llm.create(
             effort=llm.EVOLVER_EFFORT,
@@ -133,9 +149,24 @@ Reply with exactly this JSON shape (all fields required):
             raise EvolverError("The evolver ran out of tokens before finishing.")
         text = "".join(b.text for b in response.content if b.type == "text").strip()
     try:
-        data = json.loads(text[text.index("{") : text.rindex("}") + 1])
+        return _validate(_parse_json(text))
     except ValueError as e:
+        log.warning("Evolver reply was not valid JSON: %s; reply starts: %r", e, text[:300])
         raise EvolverError("The evolver did not return valid JSON.") from e
+
+
+def _parse_json(text: str) -> dict[str, Any]:
+    """Extract the JSON object from a model reply, tolerating fences and raw newlines in strings."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object found")
+    data = json.loads(text[start : end + 1], strict=False)  # strict=False: allow literal newlines/tabs in strings
+    if not isinstance(data, dict):
+        raise ValueError("JSON is not an object")
+    return data
+
+
+def _validate(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data.get("evidence"), list):
         data["evidence"] = []
     data["evidence"] = [str(e) for e in data["evidence"]][:4]
@@ -149,3 +180,6 @@ Reply with exactly this JSON shape (all fields required):
 
 class EvolverError(Exception):
     pass
+
+
+log = logging.getLogger("evolve.evolver")

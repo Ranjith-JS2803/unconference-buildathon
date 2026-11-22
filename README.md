@@ -112,7 +112,12 @@ well-behaved agent to perform an action twice.
 What's mocked: the external systems (order system, payment gateway, carrier and notifications) are
 in-memory and seeded per run. The agents, MCP protocol, outcome checks, evaluation and evolution are real.
 
-## Run it
+## Try it
+
+**Web app: https://unconference-buildathon.onrender.com** (deployed on Render: one Docker service
+serving the UI, the API and the live event stream; see [docs/DEPLOY.md](docs/DEPLOY.md)).
+
+## Run it yourself
 
 ```bash
 # backend (Python 3.12, uv)
@@ -121,11 +126,11 @@ cp .env.example .env          # add ANTHROPIC_API_KEY (or an OpenAI-format gatew
 uv sync
 uv run uvicorn app.main:app --reload --port 8001
 
-# frontend
+# frontend (dev server with hot reload, proxies /api to the backend)
 cd frontend
 npm install
-npm run dev                   # http://localhost:5173, proxies /api to :8001
+npm run dev
 ```
 
-Single-URL mode: `cd frontend && npm run build`, and the backend serves the app at http://localhost:8001.
+For a single URL like the deployed app, run `cd frontend && npm run build`; the backend then serves the UI too.
 Set `AUTOPILOT=false` in `backend/.env` to turn off automatic evolution.
