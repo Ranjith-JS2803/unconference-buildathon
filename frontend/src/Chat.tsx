@@ -4,6 +4,8 @@ import { Hovering } from './sketch'
 import type { Example, Lane } from './types'
 import { ErrorText, PassMark, Pill, Spinner } from './ui'
 import { TypeOut } from './writing'
+import type { UseCase } from './types'
+import { UcIcon, UseCasePicker } from './UseCases'
 
 export interface ReplySlot {
   version?: string
@@ -27,10 +29,16 @@ interface Props {
   onOpen: () => void
   onClose: () => void
   onSend: (text: string) => void
+  usecases: UseCase[]
+  /** null while the viewer is choosing a use case */
+  usecase: UseCase | null
+  onPick: (id: string) => void
+  onChangeUsecase: () => void
+  onInfo: (uc: UseCase) => void
 }
 
 /** Chat as a centred pop-up over a blurred page; sending a query docks it at the bottom. */
-export function Chat({ turns, examples, streaming, error, liveOutcome, open, onOpen, onClose, onSend }: Props) {
+export function Chat({ turns, examples, streaming, error, liveOutcome, open, onOpen, onClose, onSend, usecases, usecase, onPick, onChangeUsecase, onInfo }: Props) {
   const [draft, setDraft] = useState('')
   const bodyRef = useRef<HTMLDivElement>(null)
   const popRef = useRef<HTMLElement>(null)
@@ -63,15 +71,27 @@ export function Chat({ turns, examples, streaming, error, liveOutcome, open, onO
       <div className={`chat-backdrop ${open ? 'show' : ''}`} onClick={onClose} aria-hidden />
       <section ref={popRef} className={`col chat chat-pop ${open ? 'open' : 'docked'}`} role="dialog" aria-modal={open} aria-label="Chat">
         <header className="col-head">
-          <h2 className="hand">Chat</h2>
+          <div className="chat-title">
+            <h2 className="hand">Chat</h2>
+            {usecase && (
+              <button className="link-btn hand change-uc" onClick={onChangeUsecase} disabled={streaming}>
+                ← Change use case
+              </button>
+            )}
+          </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="Send chat to the back" title="Minimise (Esc)">
             <Minus size={16} />
           </button>
         </header>
         <div className="col-body chat-body" ref={bodyRef}>
-          {turns.length === 0 ? (
+          {!usecase ? (
+            <UseCasePicker usecases={usecases} onPick={onPick} onInfo={onInfo} />
+          ) : turns.length === 0 ? (
             <div className="chat-empty">
-              <p className="hand chat-empty-title">Send a customer message</p>
+              <p className="hand chat-empty-title">Recommended queries</p>
+              <p className="hand muted uc-for">
+                <UcIcon icon={usecase.icon} size={16} /> {usecase.name}
+              </p>
               <div className="suggestions">
                 {examples.map((ex, i) => (
                   <button key={ex.id} className={`suggestion hand ${i % 2 ? 'tilt-r' : 'tilt-l'}`} onClick={() => send(ex.message)} disabled={streaming}>
@@ -93,7 +113,7 @@ export function Chat({ turns, examples, streaming, error, liveOutcome, open, onO
             })
           )}
         </div>
-        <div className="chat-foot">
+        {usecase && <div className="chat-foot">
           <ErrorText error={error} />
           {turns.length > 0 && (
             <div className="chips">
@@ -114,20 +134,20 @@ export function Chat({ turns, examples, streaming, error, liveOutcome, open, onO
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder={streaming ? 'Agents are working…' : 'Message as a customer…'}
+              placeholder={streaming ? 'Agents are working…' : 'Type a message for the agents…'}
               disabled={streaming}
-              aria-label="Customer message"
+              aria-label="Message"
             />
             <button className="btn btn-primary btn-icon-lg" type="submit" disabled={streaming || !draft.trim()} aria-label="Send">
               <Send size={16} />
             </button>
           </form>
-        </div>
+        </div>}
       </section>
       <button className={`chat-dock ${open ? '' : 'show'}`} onClick={onOpen} tabIndex={open ? -1 : 0} aria-label="Open chat">
         <MessageCircle size={18} />
         <span className="dock-title hand">Chat</span>
-        <span className="dock-last hand">{last ? last.text : 'Ask the agents something'}</span>
+        <span className="dock-last hand">{last ? last.text : usecase ? usecase.name : 'Choose a use case'}</span>
         {streaming && <Spinner size={13} />}
       </button>
     </>

@@ -156,7 +156,7 @@ META: dict[str, Any] = {
     ],
     "seed_cases": [c["title"] for c in SEED_CASES],
     "queries": [
-        {"label": t["customer_message"], "message": t["customer_message"]}
+        {"id": t["id"], "label": t["customer_message"], "message": t["customer_message"]}
         for t in TICKETS
         if t["id"] in ("T1", "T4")
     ],

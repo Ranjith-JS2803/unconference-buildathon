@@ -1,6 +1,6 @@
-// Mock backend (VITE_MOCK=1). Simulates the v2 SSE chat stream:
-//  "Cancel ORD-1024" -> both lanes double-refund -> automatic evolution promotes v2.
-//  "Cancel ORD-4410" -> baseline (v1) double-refunds again, evolving (v2) passes, no evolution.
+// Mock backend (VITE_MOCK=1). A tiny engine plus two pluggable use-case packs.
+// Each pack has the same shape the real framework uses: agent prompt, MCP tools,
+// outcome checks and seed cases, plus a hidden integration quirk v1 gets wrong.
 import type {
   AgentVersion,
   AppState,
@@ -8,13 +8,13 @@ import type {
   Check,
   DiffLine,
   EvalCase,
-  Example,
   GateCaseResult,
   GateResult,
   Lane,
   Ledger,
+  LedgerItem,
   Lesson,
-  Refund,
+  UseCase,
 } from './types'
 import type { Api } from './api'
 
@@ -22,10 +22,48 @@ const now = () => new Date().toISOString()
 const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T
 const inr = (n: number) => '₹' + n.toLocaleString('en-IN')
 const jitter = (min = 200, max = 900) => min + Math.random() * (max - min)
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// ---------------------------------------------------------------- fixtures
+// ---------------------------------------------------------------- pack shape
 
-const V1_PROMPT = `You are a customer support agent for ShopKart.
+type Mode = 'v1' | 'good' | 'over' // naive SOP, correct fix, over-correction
+type Step =
+  | { note: string }
+  | { rationale: string; tool: string; input: Record<string, unknown>; output: unknown; is_error?: boolean }
+interface Sim {
+  steps: Step[]
+  reply: string
+  effect?: string
+  ledger: Ledger
+  checks: Check[]
+}
+interface AttemptCopy {
+  mode: Mode
+  diagnosis: string
+  root_cause: string
+  change_summary: string
+  evidence: string[]
+  lesson: string
+}
+interface Pack {
+  uc: UseCase
+  prompts: Record<Mode, string>
+  subjectRe: RegExp
+  simulate(subject: string, mode: Mode): Sim | null // null = unknown subject
+  askForId: string
+  seedTasks: string[]
+  autoCaseTitle: string
+  failedCheck: string
+  regressCheckLabel: string
+  attempts: AttemptCopy[] // last one is the fix that gets promoted
+  gateSubject: string // a subject used to replay the auto case
+}
+
+const first = (name: string) => name.split(' ')[0]
+
+// ---------------------------------------------------------------- pack: refunds
+
+const REFUNDS_V1 = `You are a customer support agent for ShopKart.
 You help customers cancel orders and get their money back.
 
 Tools (MCP server "commerce"): get_order, cancel_order, get_payment, create_refund, send_notification.
@@ -43,7 +81,7 @@ Rules:
 - Never refund more than the order amount.
 - Always confirm the final outcome to the customer.`
 
-const V2_PROMPT = `You are a customer support agent for ShopKart.
+const REFUNDS_GOOD = `You are a customer support agent for ShopKart.
 You help customers cancel orders and get their money back.
 
 Tools (MCP server "commerce"): get_order, cancel_order, get_payment, create_refund, send_notification.
@@ -63,77 +101,385 @@ Rules:
 - Never refund more than the order amount, counting automatic gateway refunds.
 - Always confirm the final outcome to the customer.`
 
-const V2_OVERCORRECT = V1_PROMPT.replace(
+const REFUNDS_OVER = REFUNDS_V1.replace(
   '5. Issue a refund for the full order amount with create_refund.',
   '5. Do NOT call create_refund: cancelling an order refunds the customer automatically.',
 )
 
-interface Order {
-  order_id: string
-  customer: string
-  amount: number
-  method: 'card' | 'upi'
-  gateway: string
-  status: 'confirmed' | 'shipped'
+const ORDERS: Record<string, { customer: string; amount: number; gateway: string }> = {
+  'ORD-1024': { customer: 'Priya Sharma', amount: 2499, gateway: 'Gateway X' },
+  'ORD-4410': { customer: 'Rahul Verma', amount: 12999, gateway: 'Gateway X' },
+  'ORD-2001': { customer: 'Arjun Mehta', amount: 1899, gateway: 'Gateway Y' },
 }
 
-const ORDERS: Record<string, Order> = {
-  'ORD-1024': { order_id: 'ORD-1024', customer: 'Priya Sharma', amount: 2499, method: 'card', gateway: 'Gateway X', status: 'confirmed' },
-  'ORD-2051': { order_id: 'ORD-2051', customer: 'Arjun Mehta', amount: 1899, method: 'card', gateway: 'Gateway Y', status: 'confirmed' },
-  'ORD-3307': { order_id: 'ORD-3307', customer: 'Kavya Iyer', amount: 5499, method: 'upi', gateway: 'UPI', status: 'shipped' },
-  'ORD-4410': { order_id: 'ORD-4410', customer: 'Rahul Verma', amount: 12999, method: 'card', gateway: 'Gateway X', status: 'confirmed' },
+const refunds: Pack = {
+  uc: {
+    id: 'refunds',
+    name: 'Order cancellation & refunds',
+    domain: 'E-commerce customer support',
+    icon: 'receipt',
+    summary: 'Cancels orders and refunds customers through a commerce MCP server.',
+    agent_role: 'A support agent for an online store. It handles cancellation requests: checks the order, cancels it, refunds the customer and notifies them.',
+    mcp_server: 'commerce',
+    tools: [
+      { name: 'get_order', description: 'Look up an order: status, amount, customer, payment method.' },
+      { name: 'cancel_order', description: 'Cancel an order that has not shipped.' },
+      { name: 'get_payment', description: 'Payment details for an order, including gateway and existing refunds.' },
+      { name: 'create_refund', description: 'Refund an amount to the original payment method.' },
+      { name: 'send_notification', description: 'Email the customer.' },
+    ],
+    hidden_behavior:
+      'For card orders on Gateway X, cancelling an order makes the order system refund the customer automatically (asynchronously, via webhook).',
+    expected_failure:
+      'v1 follows the SOP (cancel, then refund). Every tool call succeeds, but the customer is refunded twice because the gateway refund lands after the run.',
+    checks: ['Order cancelled', 'Customer refunded in full', 'No duplicate refunds', 'Customer notified'],
+    seed_cases: ['Card order on Gateway Y', 'UPI order', 'Shipped order: refuse cancellation'],
+    queries: [
+      { label: 'Cancel ORD-1024', message: 'Hi, please cancel my order ORD-1024 and refund my card. I ordered the wrong size.' },
+      { label: 'Cancel ORD-4410', message: "I'd like to cancel order ORD-4410 and get my money back." },
+    ],
+  },
+  prompts: { v1: REFUNDS_V1, good: REFUNDS_GOOD, over: REFUNDS_OVER },
+  subjectRe: /ORD-\d+/i,
+  askForId: 'Happy to help! Could you share your order ID (e.g. ORD-1234)?',
+  seedTasks: ['Cancel ORD-2001 (card, Gateway Y) and refund.', 'Cancel ORD-2002 (UPI) and refund.', 'Cancel ORD-2003, already shipped.'],
+  autoCaseTitle: 'Card order on Gateway X (async auto-refund)',
+  failedCheck: 'no_duplicate_refund',
+  regressCheckLabel: 'Customer refunded in full',
+  gateSubject: 'ORD-1024',
+  simulate(id, mode) {
+    const o = ORDERS[id]
+    if (!o) return null
+    const autoRefund = o.gateway === 'Gateway X'
+    const steps: Step[] = []
+    const items: LedgerItem[] = []
+    const getPayment = (why: string): Step => ({
+      rationale: why,
+      tool: 'get_payment',
+      input: { order_id: id },
+      output: { order_id: id, amount: o.amount, method: 'card', gateway: o.gateway, refunds: [] },
+    })
+    const cancel = (why: string): Step => ({ rationale: why, tool: 'cancel_order', input: { order_id: id, reason: 'customer_request' }, output: { order_id: id, status: 'cancelled' } })
+
+    steps.push({
+      rationale: 'Checking the order status before doing anything else.',
+      tool: 'get_order',
+      input: { order_id: id },
+      output: { order_id: id, customer: o.customer, status: 'placed', amount: o.amount, currency: 'INR', payment_method: 'card' },
+    })
+    if (mode === 'good') {
+      steps.push(getPayment('Checking the payment gateway before cancelling, since some gateways refund on their own.'))
+      if (autoRefund) steps.push({ note: 'Card on Gateway X: it refunds automatically when the order is cancelled, so I must not call create_refund.' })
+      steps.push(cancel('Order is placed and not shipped, so I can cancel it now.'))
+    } else if (mode === 'over') {
+      steps.push(cancel('Cancelling the order; cancellation refunds the customer automatically.'))
+    } else {
+      steps.push(cancel('Order has not shipped. Following the SOP: cancel first.'))
+      steps.push(getPayment('Checking the payment to see whether a refund already exists.'))
+    }
+    if (mode === 'v1' || (mode === 'good' && !autoRefund)) {
+      const rid = `rf_${id.slice(4)}_1`
+      items.push({ id: rid, text: `${inr(o.amount)} · PROCESSING`, by: 'api', flagged: false })
+      steps.push({
+        rationale: mode === 'v1' ? 'No refund on the payment yet, so I will refund the full amount.' : `${o.gateway} does not refund on its own, so I will issue the refund.`,
+        tool: 'create_refund',
+        input: { order_id: id, amount: o.amount, reason: 'order_cancelled' },
+        output: { refund_id: rid, status: 'processing', amount: o.amount },
+      })
+    }
+    const msg = `Hi ${first(o.customer)}, your order ${id} is cancelled and a refund of ${inr(o.amount)} is on its way.`
+    steps.push({
+      rationale: 'Letting the customer know the order is cancelled and the refund is on its way.',
+      tool: 'send_notification',
+      input: { order_id: id, channel: 'email', message: msg },
+      output: { notification_id: `ntf_${id.slice(4)}`, status: 'sent' },
+    })
+    if (autoRefund) items.push({ id: `rf_${id.slice(4)}_auto`, text: `${inr(o.amount)} · PROCESSING`, by: 'order-system', flagged: true })
+
+    const total = items.length * o.amount
+    return {
+      steps,
+      reply: `Your order ${id} has been cancelled, and a full refund of ${inr(o.amount)} went through. You'll see it in 3–5 business days.`,
+      effect: autoRefund ? `Order-system webhook delivered: Gateway X auto-refund ${inr(o.amount)}` : undefined,
+      ledger: {
+        subject: id,
+        facts: [
+          { label: 'Customer', value: o.customer },
+          { label: 'Order', value: `${inr(o.amount)} · placed → cancelled` },
+          { label: 'Payment', value: `card · ${o.gateway}` },
+        ],
+        items_label: 'Refunds',
+        items,
+        total: { label: 'Refunded', value: `${inr(total)} · ${items.length} refund${items.length === 1 ? '' : 's'}`, bad: total !== o.amount },
+        notifications: [{ notification_id: `ntf_${id.slice(4)}`, message: msg }],
+      },
+      checks: [
+        { name: 'order_cancelled', label: 'Order cancelled', passed: true, detail: `${id} is cancelled` },
+        { name: 'customer_refunded', label: 'Customer refunded in full', passed: total >= o.amount, detail: `${inr(total)} refunded on a ${inr(o.amount)} order` },
+        {
+          name: 'no_duplicate_refund',
+          label: 'No duplicate refunds',
+          passed: total <= o.amount,
+          detail: total > o.amount ? `${inr(total)} refunded on a ${inr(o.amount)} order (${items.length} refunds), expected ${inr(o.amount)}` : `${items.length} refund, total ${inr(total)}`,
+        },
+        { name: 'customer_notified', label: 'Customer notified', passed: true, detail: '1 notification sent' },
+      ],
+    }
+  },
+  attempts: [
+    {
+      mode: 'over',
+      diagnosis: 'Every tool call succeeded, yet the customer got two refunds: the system refunded on its own after cancel_order.',
+      root_cause: 'The SOP always calls create_refund after cancelling, but cancelling already triggers a refund asynchronously, so the agent cannot see it in time.',
+      change_summary: 'Never call create_refund after cancel_order.',
+      evidence: ['[trace] I called create_refund right after cancel_order', '[end state] A second ₹2,499 refund was initiated by order-system after the run'],
+      lesson: 'Cancelling refunds automatically, so never issue a manual refund.',
+    },
+    {
+      mode: 'good',
+      diagnosis: 'My first fix stopped refunding everywhere. Only Gateway X refunds automatically on cancellation.',
+      root_cause: 'The auto-refund is specific to Gateway X card payments. Other gateways still need create_refund, so the rule must check the gateway.',
+      change_summary: 'Check the gateway first; skip create_refund only for Gateway X card orders.',
+      evidence: [
+        '[eval set] case-001 (Gateway Y) failed with v2: the customer got no refund at all',
+        '[end state] Only Gateway X orders got a refund initiated by order-system',
+        '[trace] get_payment returns the gateway name before I cancel',
+      ],
+      lesson: 'For Gateway X card orders, cancelling refunds automatically, so never issue a manual refund.',
+    },
+  ],
 }
 
-const EXAMPLES: Example[] = [
-  { id: 'ex1', label: 'Cancel ORD-1024', message: 'Hi, please cancel my order ORD-1024 and refund my card. I ordered the wrong size.' },
-  { id: 'ex2', label: 'Cancel ORD-4410', message: "I'd like to cancel order ORD-4410 and get my money back." },
-]
+// ---------------------------------------------------------------- pack: parcels
 
-const SEED_CASES: Omit<EvalCase, 'created_at'>[] = [
-  { id: 'case-001', title: 'Card order on Gateway Y', origin: 'seed', task: 'Cancel ORD-2001 (card, Gateway Y) and refund.' },
-  { id: 'case-002', title: 'UPI order', origin: 'seed', task: 'Cancel ORD-2002 (UPI) and refund.' },
-  { id: 'case-003', title: 'Shipped order: refuse cancellation', origin: 'seed', task: 'Cancel ORD-2003, already shipped.' },
-]
+const PARCELS_V1 = `You are a customer support agent for a logistics company.
+You help customers whose parcels are lost in transit.
 
-// ---------------------------------------------------------------- state
+Tools (MCP server "logistics"): get_shipment, file_lost_claim, list_replacements, create_replacement, send_notification.
+
+Standard operating procedure for a lost parcel:
+1. Look up the shipment with get_shipment and confirm it is lost in transit.
+2. File a lost-parcel claim with file_lost_claim.
+3. Check existing replacements with list_replacements.
+4. Ship a replacement with create_replacement.
+5. Notify the customer with send_notification.
+
+Rules:
+- Be polite and concise.
+- Ship at most one replacement per lost parcel.
+- Always confirm the final outcome to the customer.`
+
+const PARCELS_GOOD = `You are a customer support agent for a logistics company.
+You help customers whose parcels are lost in transit.
+
+Tools (MCP server "logistics"): get_shipment, file_lost_claim, list_replacements, create_replacement, send_notification.
+
+Standard operating procedure for a lost parcel:
+1. Look up the shipment with get_shipment, confirm it is lost, and note the carrier.
+2. File a lost-parcel claim with file_lost_claim.
+3. Check existing replacements with list_replacements.
+4. If the carrier is SwiftShip, do NOT call create_replacement:
+   SwiftShip auto-dispatches a replacement (async webhook) once a claim is filed.
+   For all other carriers, ship a replacement with create_replacement.
+5. Notify the customer with send_notification.
+
+Rules:
+- Be polite and concise.
+- Ship at most one replacement per lost parcel, counting automatic carrier replacements.
+- Always confirm the final outcome to the customer.`
+
+const SHIPMENTS: Record<string, { customer: string; carrier: string; contents: string }> = {
+  'SHP-5521': { customer: 'Ananya Rao', carrier: 'SwiftShip', contents: 'Wireless earbuds' },
+  'SHP-7730': { customer: 'Vikram Nair', carrier: 'SwiftShip', contents: 'Running shoes' },
+  'SHP-6100': { customer: 'Meera Joshi', carrier: 'BlueDart', contents: 'Desk lamp' },
+}
+
+const parcels: Pack = {
+  uc: {
+    id: 'parcels',
+    name: 'Lost-parcel replacement',
+    domain: 'Logistics customer support',
+    icon: 'package',
+    summary: 'Files lost-parcel claims and ships replacements through a logistics MCP server.',
+    agent_role: 'A support agent for a delivery company. When a parcel is lost in transit it files a claim, ships a replacement and keeps the customer informed.',
+    mcp_server: 'logistics',
+    tools: [
+      { name: 'get_shipment', description: 'Look up a shipment: status, carrier, contents, customer.' },
+      { name: 'file_lost_claim', description: 'File a lost-parcel claim with the carrier.' },
+      { name: 'list_replacements', description: 'List replacement shipments already created for a shipment.' },
+      { name: 'create_replacement', description: 'Dispatch a replacement parcel to the customer.' },
+      { name: 'send_notification', description: 'Email the customer.' },
+    ],
+    hidden_behavior:
+      'When a lost-parcel claim is filed for a SwiftShip shipment, SwiftShip automatically dispatches a replacement parcel (asynchronously, via webhook).',
+    expected_failure:
+      'v1 files the claim and then creates a replacement. Every tool call succeeds, but the customer receives two replacement parcels.',
+    checks: ['Lost claim filed', 'Customer gets a replacement', 'Exactly one replacement', 'Customer notified'],
+    seed_cases: ['BlueDart parcel lost', 'Delivered parcel: no replacement', 'Damaged parcel: refund instead'],
+    queries: [
+      { label: 'Replace SHP-5521', message: 'My package SHP-5521 never arrived, can you send a replacement?' },
+      { label: 'Replace SHP-7730', message: 'Parcel SHP-7730 is lost, please replace it.' },
+    ],
+  },
+  prompts: { v1: PARCELS_V1, good: PARCELS_GOOD, over: PARCELS_V1 },
+  subjectRe: /SHP-\d+/i,
+  askForId: 'Sorry to hear that! Could you share your shipment ID (e.g. SHP-1234)?',
+  seedTasks: ['SHP-2001 (BlueDart) is lost, replace it.', 'SHP-2002 shows delivered but customer asks for a replacement.', 'SHP-2003 arrived damaged.'],
+  autoCaseTitle: 'SwiftShip parcel lost (async auto-replacement)',
+  failedCheck: 'no_duplicate_replacement',
+  regressCheckLabel: 'Customer gets a replacement',
+  gateSubject: 'SHP-5521',
+  simulate(id, mode) {
+    const s = SHIPMENTS[id]
+    if (!s) return null
+    const auto = s.carrier === 'SwiftShip'
+    const steps: Step[] = []
+    const items: LedgerItem[] = []
+    const claim = `CLM-${id.slice(4)}`
+    steps.push({
+      rationale: 'Looking up the shipment to confirm it is really lost.',
+      tool: 'get_shipment',
+      input: { shipment_id: id },
+      output: { shipment_id: id, customer: s.customer, carrier: s.carrier, status: 'lost_in_transit', contents: s.contents },
+    })
+    steps.push({
+      rationale: 'The carrier marks it lost, so I will file a lost-parcel claim first.',
+      tool: 'file_lost_claim',
+      input: { shipment_id: id, reason: 'lost_in_transit' },
+      output: { claim_id: claim, status: 'filed' },
+    })
+    steps.push({
+      rationale: 'Checking whether a replacement already exists for this shipment.',
+      tool: 'list_replacements',
+      input: { shipment_id: id },
+      output: { shipment_id: id, replacements: [] },
+    })
+    if (mode === 'good' && auto) steps.push({ note: 'SwiftShip dispatches a replacement automatically once a claim is filed, so I must not create one.' })
+    if (mode === 'v1' || (mode === 'good' && !auto)) {
+      const rid = `RPL-${id.slice(4)}`
+      items.push({ id: rid, text: `${s.contents} · DISPATCHED`, by: 'api', flagged: false })
+      steps.push({
+        rationale: mode === 'v1' ? 'No replacement exists yet, so I will create one.' : `${s.carrier} does not replace parcels on its own, so I will create the replacement.`,
+        tool: 'create_replacement',
+        input: { shipment_id: id, contents: s.contents },
+        output: { replacement_id: rid, status: 'dispatched' },
+      })
+    }
+    const msg = `Hi ${first(s.customer)}, we've filed a claim for ${id} and a replacement ${s.contents.toLowerCase()} is on its way.`
+    steps.push({
+      rationale: 'Letting the customer know a replacement is on its way.',
+      tool: 'send_notification',
+      input: { shipment_id: id, channel: 'email', message: msg },
+      output: { notification_id: `ntf_${id.slice(4)}`, status: 'sent' },
+    })
+    if (auto) items.push({ id: `SW-${id.slice(4)}`, text: `${s.contents} · DISPATCHED`, by: 'swiftship', flagged: true })
+    const n = items.length
+    return {
+      steps,
+      reply: `I've filed a lost-parcel claim for ${id} and a replacement ${s.contents.toLowerCase()} has been dispatched to you.`,
+      effect: auto ? `SwiftShip webhook delivered: replacement parcel dispatched for ${id}` : undefined,
+      ledger: {
+        subject: id,
+        facts: [
+          { label: 'Customer', value: s.customer },
+          { label: 'Shipment', value: `${s.contents} · lost in transit` },
+          { label: 'Carrier', value: s.carrier },
+          { label: 'Claim', value: `${claim} · filed` },
+        ],
+        items_label: 'Replacement shipments',
+        items,
+        total: { label: 'Replacements sent', value: `${n} parcel${n === 1 ? '' : 's'}`, bad: n !== 1 },
+        notifications: [{ notification_id: `ntf_${id.slice(4)}`, message: msg }],
+      },
+      checks: [
+        { name: 'claim_filed', label: 'Lost claim filed', passed: true, detail: `${claim} filed with ${s.carrier}` },
+        { name: 'replacement_sent', label: 'Customer gets a replacement', passed: n >= 1, detail: `${n} replacement parcel${n === 1 ? '' : 's'}` },
+        {
+          name: 'no_duplicate_replacement',
+          label: 'Exactly one replacement',
+          passed: n <= 1,
+          detail: n > 1 ? `${n} replacement parcels shipped for 1 lost parcel, expected 1` : '1 replacement parcel',
+        },
+        { name: 'customer_notified', label: 'Customer notified', passed: true, detail: '1 notification sent' },
+      ],
+    }
+  },
+  attempts: [
+    {
+      mode: 'good',
+      diagnosis: 'Every tool call succeeded, yet the customer was sent two replacement parcels.',
+      root_cause: 'The SOP always calls create_replacement after filing the claim. SwiftShip dispatches its own replacement asynchronously, so list_replacements was still empty when I checked.',
+      change_summary: 'Check the carrier; skip create_replacement for SwiftShip shipments.',
+      evidence: [
+        '[trace] I called create_replacement right after file_lost_claim',
+        '[end state] A second replacement was dispatched by swiftship after the run',
+        '[eval set] BlueDart parcels (case-001) never get an automatic replacement',
+      ],
+      lesson: 'For SwiftShip shipments, filing a lost claim auto-dispatches a replacement — never create one manually.',
+    },
+  ],
+}
+
+const PACKS: Record<string, Pack> = { refunds, parcels }
+
+// ---------------------------------------------------------------- per-use-case state
 
 interface DB {
   champion_id: string
   versions: AgentVersion[]
   eval_cases: EvalCase[]
   evolving_now: boolean
-  seq: number
-  lessons: Lesson[] // lessons carried by each version (cumulative)
+  lessons: Lesson[]
 }
-let db: DB = fresh()
+const dbs: Record<string, DB> = {}
+let seq = 0
+const nextId = (p: string) => `${p}-${String(++seq).padStart(4, '0')}`
 
-function fresh(): DB {
+function fresh(pack: Pack): DB {
   const t = now()
   return {
     champion_id: 'v1',
-    versions: [{ id: 'v1', status: 'champion', parent_id: null, prompt: V1_PROMPT, created_at: t }],
-    eval_cases: SEED_CASES.map((c) => ({ ...c, created_at: t })),
+    versions: [{ id: 'v1', status: 'champion', parent_id: null, prompt: pack.prompts.v1, created_at: t }],
+    eval_cases: pack.uc.seed_cases.map((title, i) => ({
+      id: `case-${String(i + 1).padStart(3, '0')}`,
+      title,
+      origin: 'seed' as const,
+      task: pack.seedTasks[i] ?? title,
+      created_at: t,
+    })),
     evolving_now: false,
-    seq: 0,
     lessons: [],
   }
 }
+function packOf(uc: string): Pack {
+  const p = PACKS[uc]
+  if (!p) throw new Error(`Unknown use case: ${uc}`)
+  return p
+}
+function dbOf(uc: string): DB {
+  return (dbs[uc] ??= fresh(packOf(uc)))
+}
+const lessonsFor = (db: DB, v: string) => db.lessons.filter((l) => Number(l.version_id.slice(1)) <= Number(v.slice(1)))
+function modeOf(pack: Pack, db: DB, versionId: string): Mode {
+  const p = db.versions.find((v) => v.id === versionId)?.prompt
+  return p === pack.prompts.good ? 'good' : p === pack.prompts.over && p !== pack.prompts.v1 ? 'over' : 'v1'
+}
 
-const snapshot = (): AppState =>
-  clone({
+function snapshot(uc: string): AppState {
+  const pack = packOf(uc)
+  const db = dbOf(uc)
+  return clone({
     baseline_id: 'v1',
     champion_id: db.champion_id,
     autopilot: true,
     evolving_now: db.evolving_now,
     versions: db.versions,
     eval_cases: db.eval_cases,
-    examples: EXAMPLES,
-    lessons: lessonsFor(db.champion_id),
+    examples: pack.uc.queries.map((q, i) => ({ id: `ex${i + 1}`, ...q })),
+    lessons: lessonsFor(db, db.champion_id),
+    usecase: uc,
   })
-
-const lessonsFor = (v: string) => db.lessons.filter((l) => Number(l.version_id.slice(1)) <= Number(v.slice(1)))
-const nextId = (p: string) => `${p}-${String(++db.seq).padStart(4, '0')}`
-const knowsGatewayX = (versionId: string) => db.versions.find((v) => v.id === versionId)?.prompt.includes('Gateway X refunds') ?? false
+}
 
 function lineDiff(a: string, b: string): DiffLine[] {
   const A = a.split('\n')
@@ -154,40 +500,54 @@ function lineDiff(a: string, b: string): DiffLine[] {
   return out
 }
 
-// ---------------------------------------------------------------- stream
+// ---------------------------------------------------------------- API
 
 class Cancelled extends Error {}
+type Emit = (ev: ChatEvent) => void
+type Pause = (min?: number, max?: number) => Promise<void>
+interface LaneResult {
+  passed: boolean | null
+  reply: string
+  checks: Check[]
+  ledger: Ledger | null
+  toolCount: number
+}
 
 export const mockApi: Api = {
-  async getState() {
+  async listUsecases() {
     await wait(120)
-    return snapshot()
+    return clone(Object.values(PACKS).map((p) => p.uc))
   },
-  async reset() {
+  async getState(uc) {
+    await wait(120)
+    return snapshot(uc)
+  },
+  async reset(uc) {
     await wait(300)
-    db = fresh()
-    return snapshot()
+    dbs[uc] = fresh(packOf(uc))
+    return snapshot(uc)
   },
-  stream(message, onEvent) {
+  stream(uc, message, onEvent) {
     let cancelled = false
-    const emit = (ev: ChatEvent) => {
+    const emit: Emit = (ev) => {
       if (cancelled) throw new Cancelled()
       onEvent(ev)
     }
-    const pause = async (min?: number, max?: number) => {
+    const pause: Pause = async (min, max) => {
       await wait(jitter(min, max))
       if (cancelled) throw new Cancelled()
     }
     ;(async () => {
+      const pack = packOf(uc)
+      const db = dbOf(uc)
       try {
-        const runIds: Record<Lane, string> = { baseline: nextId('run'), evolving: nextId('run') }
         const versions: Record<Lane, string> = { baseline: 'v1', evolving: db.champion_id }
+        const runIds: Record<Lane, string> = { baseline: nextId('run'), evolving: nextId('run') }
         const results = await Promise.all(
-          (['baseline', 'evolving'] as Lane[]).map((lane) => runLane(lane, versions[lane], runIds[lane], message, emit, pause)),
+          (['baseline', 'evolving'] as Lane[]).map((lane) => runLane(pack, db, lane, versions[lane], runIds[lane], message, emit, pause)),
         )
         emit({ type: 'lane_done', lane: 'baseline' })
-        const evolving = results[1]
-        if (evolving.passed === false) await evolve(runIds.evolving, message, evolving, emit, pause)
+        if (results[1].passed === false) await evolve(pack, db, runIds.evolving, message, results[1], emit, pause)
         emit({ type: 'lane_done', lane: 'evolving' })
         emit({ type: 'done' })
       } catch (e) {
@@ -205,156 +565,51 @@ export const mockApi: Api = {
   },
 }
 
-function wait(ms: number) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-type Emit = (ev: ChatEvent) => void
-type Pause = (min?: number, max?: number) => Promise<void>
-
-async function runLane(lane: Lane, versionId: string, runId: string, message: string, emit: Emit, pause: Pause) {
-  emit({ type: 'run_started', lane, version_id: versionId, run_id: runId, lessons: clone(lessonsFor(versionId)) })
-  const orderId = message.toUpperCase().match(/ORD-\d+/)?.[0]
-  const order = orderId ? ORDERS[orderId] : undefined
-  const fixed = knowsGatewayX(versionId)
-
+async function runLane(pack: Pack, db: DB, lane: Lane, versionId: string, runId: string, message: string, emit: Emit, pause: Pause): Promise<LaneResult> {
+  emit({ type: 'run_started', lane, version_id: versionId, run_id: runId, lessons: clone(lessonsFor(db, versionId)) })
   const think = async () => {
     emit({ type: 'agent_thinking', lane })
     await pause(500, 1300)
   }
-  let callSeq = 0
-  const call = async (rationale: string, tool: string, input: Record<string, unknown>, output: unknown, is_error = false) => {
-    const call_id = `${lane[0]}${++callSeq}`
-    emit({ type: 'agent_text', lane, text: rationale })
-    await pause(250, 600)
-    emit({ type: 'tool_call', lane, call_id, server: 'commerce', tool, input })
-    await pause(250, 800)
-    emit({ type: 'tool_result', lane, call_id, tool, output, is_error })
-    await pause(150, 400)
-  }
-
   await think()
-
-  if (!orderId) {
-    const text = "Happy to help! Could you share your order ID (e.g. ORD-1234) so I can look into it?"
+  const subject = message.match(pack.subjectRe)?.[0]?.toUpperCase()
+  const sim = subject ? pack.simulate(subject, modeOf(pack, db, versionId)) : null
+  if (!sim) {
+    const text = subject ? `I couldn't find ${subject}. Could you double-check the ID?` : pack.askForId
     emit({ type: 'agent_reply', lane, text })
     await pause()
     emit({ type: 'checks', lane, run_id: runId, passed: null, checks: [], ledger: null })
-    return { passed: null, reply: text, checks: [] as Check[], ledger: null }
+    return { passed: null, reply: text, checks: [], ledger: null, toolCount: 0 }
   }
-
-  if (!order) {
-    await call(`Looking up ${orderId} to see what the customer ordered.`, 'get_order', { order_id: orderId }, `Order ${orderId} not found`, true)
-    await think()
-    emit({ type: 'agent_reply', lane, text: `I couldn't find order ${orderId}. Could you double-check the ID?` })
-    await pause()
-    emit({ type: 'checks', lane, run_id: runId, passed: null, checks: [], ledger: null })
-    return { passed: null, reply: '', checks: [] as Check[], ledger: null }
-  }
-
-  const refunds: Refund[] = []
-  const notifications: Ledger['notifications'] = []
-  let rf = 0
-  const refundId = () => `rf_${order.order_id.slice(4)}_${++rf}`
-
-  await call('Checking the order status before doing anything else.', 'get_order', { order_id: order.order_id }, {
-    order_id: order.order_id,
-    customer: order.customer,
-    status: order.status,
-    amount: order.amount,
-    currency: 'INR',
-    payment_method: order.method,
-  })
-  await think()
-
-  const payment = (r: Refund[]) => ({ order_id: order.order_id, amount: order.amount, gateway: order.gateway, method: order.method, refunds: r.map((x) => ({ ...x })) })
-
-  let reply: string
-  let statusAfter: string = order.status
-
-  if (order.status === 'shipped') {
-    emit({ type: 'agent_text', lane, text: 'The order has already shipped, so it cannot be cancelled. I should offer a return instead.' })
-    await pause()
-    await think()
-    const msg = `Hi ${order.customer.split(' ')[0]}, ${order.order_id} has already shipped so we can't cancel it, but you can return it within 7 days of delivery for a full refund.`
-    await call('Emailing the customer the return steps instead.', 'send_notification', { order_id: order.order_id, channel: 'email', message: msg }, { notification_id: 'ntf_' + order.order_id.slice(4), status: 'sent' })
-    notifications.push({ notification_id: 'ntf_' + order.order_id.slice(4), message: msg })
-    reply = `Your order ${order.order_id} has already shipped, so it can't be cancelled. You can return it after delivery for a full refund — I've emailed you the steps.`
-  } else {
-    if (fixed) {
-      await call('Checking the payment gateway before cancelling, since some gateways refund on their own.', 'get_payment', { order_id: order.order_id }, payment(refunds))
-      if (order.gateway === 'Gateway X') {
-        await think()
-        emit({ type: 'agent_text', lane, text: 'Paid by card on Gateway X: it refunds automatically when the order is cancelled, so I must not call create_refund.' })
-        await pause()
-      }
+  let n = 0
+  for (const step of sim.steps) {
+    if ('note' in step) {
+      emit({ type: 'agent_text', lane, text: step.note })
+      await pause()
       await think()
-      await call('Order is confirmed and not shipped, so I can cancel it now.', 'cancel_order', { order_id: order.order_id, reason: 'customer_request' }, { order_id: order.order_id, status: 'cancelled' })
-    } else {
-      await call('Order has not shipped. Following the SOP: cancel first.', 'cancel_order', { order_id: order.order_id, reason: 'customer_request' }, { order_id: order.order_id, status: 'cancelled' })
-      await think()
-      await call('Checking the payment to see whether a refund already exists.', 'get_payment', { order_id: order.order_id }, payment(refunds))
-      await think()
+      continue
     }
-    statusAfter = 'cancelled'
-    if (!(fixed && order.gateway === 'Gateway X')) {
-      if (fixed) await think()
-      const r: Refund = { refund_id: refundId(), amount: order.amount, status: 'processing', initiated_by: 'agent' }
-      refunds.push(r)
-      await call(refunds.length ? 'Issuing the refund.' : 'No refund on the payment yet, so I will refund the full amount.', 'create_refund', { order_id: order.order_id, amount: order.amount, reason: 'order_cancelled' }, { refund_id: r.refund_id, status: r.status, amount: r.amount })
-    }
+    const call_id = `${lane[0]}${++n}`
+    emit({ type: 'agent_text', lane, text: step.rationale })
+    await pause(250, 600)
+    emit({ type: 'tool_call', lane, call_id, server: pack.uc.mcp_server, tool: step.tool, input: step.input })
+    await pause(250, 800)
+    emit({ type: 'tool_result', lane, call_id, tool: step.tool, output: step.output, is_error: !!step.is_error })
+    await pause(150, 400)
     await think()
-    const msg = `Hi ${order.customer.split(' ')[0]}, your order ${order.order_id} is cancelled and a refund of ${inr(order.amount)} is on its way (3–5 business days).`
-    const nid = `ntf_${order.order_id.slice(4)}`
-    await call('Letting the customer know the order is cancelled and the refund is on its way.', 'send_notification', { order_id: order.order_id, channel: 'email', message: msg }, { notification_id: nid, status: 'sent' })
-    notifications.push({ notification_id: nid, message: msg })
-    reply = `Your order ${order.order_id} has been cancelled, and a full refund of ${inr(order.amount)} went through. You'll see it in 3–5 business days.`
   }
-
-  await think()
-  emit({ type: 'agent_reply', lane, text: reply })
+  emit({ type: 'agent_reply', lane, text: sim.reply })
   await pause(400, 900)
-
-  if (order.gateway === 'Gateway X' && statusAfter === 'cancelled') {
-    refunds.unshift({ refund_id: refundId(), amount: order.amount, status: 'processing', initiated_by: 'order-system' })
-    emit({ type: 'async_effects', lane, description: `Order-system webhook delivered: Gateway X auto-refund ${inr(order.amount)}` })
+  if (sim.effect) {
+    emit({ type: 'async_effects', lane, description: sim.effect })
     await pause(400, 900)
   }
-
-  const total = refunds.reduce((s, r) => s + r.amount, 0)
-  const checks: Check[] =
-    order.status === 'shipped'
-      ? [
-          { name: 'not_cancelled', label: 'Shipped order not cancelled', passed: true, detail: `${order.order_id} is still shipped` },
-          { name: 'no_refund', label: 'No refund for shipped order', passed: total === 0, detail: `${inr(total)} refunded` },
-          { name: 'customer_notified', label: 'Customer notified', passed: true, detail: 'Return instructions sent' },
-        ]
-      : [
-          { name: 'order_cancelled', label: 'Order cancelled', passed: true, detail: `${order.order_id} is cancelled` },
-          { name: 'customer_refunded', label: 'Customer refunded in full', passed: total >= order.amount, detail: `${inr(total)} refunded on a ${inr(order.amount)} order` },
-          {
-            name: 'no_duplicate_refund',
-            label: 'No duplicate refunds',
-            passed: total <= order.amount,
-            detail: total > order.amount ? `${inr(total)} refunded on a ${inr(order.amount)} order (${refunds.length} refunds), expected ${inr(order.amount)}` : `${refunds.length} refund, total ${inr(total)}`,
-          },
-          { name: 'customer_notified', label: 'Customer notified', passed: notifications.length > 0, detail: `${notifications.length} notification sent` },
-        ]
-  const passed = checks.every((c) => c.passed)
-  const ledger: Ledger = {
-    order_id: order.order_id,
-    order_status_before: order.status,
-    order_status_after: statusAfter,
-    amount: order.amount,
-    currency: 'INR',
-    refunds,
-    notifications,
-  }
-  emit({ type: 'checks', lane, run_id: runId, passed, checks, ledger })
-  return { passed, reply, checks, ledger }
+  const passed = sim.checks.every((c) => c.passed)
+  emit({ type: 'checks', lane, run_id: runId, passed, checks: sim.checks, ledger: sim.ledger })
+  return { passed, reply: sim.reply, checks: sim.checks, ledger: sim.ledger, toolCount: n }
 }
 
-async function evolve(runId: string, message: string, run: { reply: string; checks: Check[]; ledger: Ledger | null }, emit: Emit, pause: Pause) {
+async function evolve(pack: Pack, db: DB, runId: string, message: string, run: LaneResult, emit: Emit, pause: Pause) {
   await pause(500, 900)
   if (db.evolving_now) {
     emit({ type: 'evolution_skipped', lane: 'evolving', reason: 'An evolution cycle is already running.' })
@@ -369,7 +624,7 @@ async function evolve(runId: string, message: string, run: { reply: string; chec
     type: 'evolution_started',
     lane: 'evolving',
     run_id: runId,
-    reason: 'Outcome check failed: no_duplicate_refund',
+    reason: `Outcome check failed: ${pack.failedCheck}`,
     belief: run.reply,
     reality: run.checks.filter((c) => !c.passed).map((c) => `${c.label}: ${c.detail}`),
     ledger: run.ledger,
@@ -378,7 +633,7 @@ async function evolve(runId: string, message: string, run: { reply: string; chec
 
   const ec: EvalCase = {
     id: `case-${String(db.eval_cases.length + 1).padStart(3, '0')}`,
-    title: 'Card order on Gateway X (async auto-refund)',
+    title: pack.autoCaseTitle,
     origin: 'auto',
     source_run_id: runId,
     task: message,
@@ -390,18 +645,17 @@ async function evolve(runId: string, message: string, run: { reply: string; chec
 
   const champ = db.versions.find((v) => v.id === db.champion_id)!
   const MAX = 3
-  let feedback: string | null = null
-  for (let attempt = 1; attempt <= MAX; attempt++) {
+  let feedback = ''
+  for (let attempt = 1; attempt <= Math.min(MAX, pack.attempts.length); attempt++) {
+    const copy = pack.attempts[attempt - 1]
     if (attempt > 1) {
-      emit({ type: 'evolution_retry', lane: 'evolving', attempt, max_attempts: MAX, reason: feedback! })
+      emit({ type: 'evolution_retry', lane: 'evolving', attempt, max_attempts: MAX, reason: feedback })
       await pause(600, 900)
     }
     emit({ type: 'diagnosing', lane: 'evolving', version_id: champ.id })
     await pause(2500, 3500)
 
-    // Attempt 1 over-corrects (never refunds at all); attempt 2 gets it right.
-    const good = attempt > 1
-    const prompt = good ? V2_PROMPT : V2_OVERCORRECT
+    const prompt = pack.prompts[copy.mode]
     const cand: AgentVersion = {
       id: `v${db.versions.length + 1}`,
       status: 'candidate',
@@ -409,28 +663,11 @@ async function evolve(runId: string, message: string, run: { reply: string; chec
       prompt,
       created_at: now(),
       source_run_id: runId,
-      diagnosis: good
-        ? 'My first fix stopped refunding everywhere. Only Gateway X refunds automatically on cancellation.'
-        : 'Every tool call succeeded, yet the customer got two refunds: the gateway refunded on its own after cancel_order.',
-      root_cause: good
-        ? 'The auto-refund is specific to Gateway X card payments. Other gateways still need create_refund, so the rule must check the gateway.'
-        : 'The SOP always calls create_refund after cancelling, but cancelling already triggers a refund asynchronously, so the agent cannot see it in time.',
-      change_summary: good
-        ? 'Check the gateway first; skip create_refund only for Gateway X card orders.'
-        : 'Never call create_refund after cancel_order.',
-      evidence: good
-        ? [
-            '[eval set] case-001 (Gateway Y) failed with v2: the customer got no refund at all',
-            `[end state] Only Gateway X orders got a refund initiated by order-system`,
-            '[trace] get_payment returns the gateway name before I cancel',
-          ]
-        : [
-            '[trace] I called create_refund right after cancel_order',
-            `[end state] A second ${inr(run.ledger?.amount ?? 0)} refund was initiated by order-system after the run`,
-          ],
-      lesson: good
-        ? 'For Gateway X card orders, cancelling refunds automatically, so never issue a manual refund.'
-        : 'Cancelling refunds automatically, so never issue a manual refund.',
+      diagnosis: copy.diagnosis,
+      root_cause: copy.root_cause,
+      change_summary: copy.change_summary,
+      evidence: copy.evidence.map((e) => e.replace('v2', `v${db.versions.length}`)),
+      lesson: copy.lesson,
       diff: lineDiff(champ.prompt, prompt),
       gate: null,
     }
@@ -441,14 +678,15 @@ async function evolve(runId: string, message: string, run: { reply: string; chec
     const cases = db.eval_cases.map((c) => ({ case_id: c.id, title: c.title, origin: c.origin }))
     emit({ type: 'gate_started', lane: 'evolving', champion_id: champ.id, candidate_id: cand.id, cases })
     const results: GateCaseResult[] = []
+    const champMode = modeOf(pack, db, champ.id)
     for (const c of cases) {
       await pause(600, 1200)
-      const champPass = c.origin !== 'auto' || knowsGatewayX(champ.id)
-      const candPass = good || c.case_id !== 'case-001'
+      const champPass = c.origin !== 'auto' || champMode === 'good'
+      const candPass = copy.mode === 'good' || c.case_id !== 'case-001'
       const r: GateCaseResult = {
         ...c,
-        champion: { run_id: nextId('run'), passed: champPass, failed_checks: champPass ? [] : ['no_duplicate_refund'] },
-        candidate: { run_id: nextId('run'), passed: candPass, failed_checks: candPass ? [] : ['customer_refunded'] },
+        champion: { run_id: nextId('run'), passed: champPass, failed_checks: champPass ? [] : [pack.failedCheck] },
+        candidate: { run_id: nextId('run'), passed: candPass, failed_checks: candPass ? [] : ['regression'] },
       }
       results.push(r)
       emit({ type: 'gate_case', lane: 'evolving', result: r })
@@ -460,9 +698,7 @@ async function evolve(runId: string, message: string, run: { reply: string; chec
     const regressions = results.filter((r) => r.champion.passed && !r.candidate.passed).map((r) => r.case_id)
     const promoted = candidate_score > champion_score && regressions.length === 0
     const reg = results.find((r) => regressions.includes(r.case_id))
-    feedback = reg
-      ? `${cand.id} regressed on ${reg.case_id} (${reg.title}): Customer refunded in full`
-      : `${cand.id} did not beat ${champ.id}`
+    feedback = reg ? `${cand.id} regressed on ${reg.case_id} (${reg.title}): ${pack.regressCheckLabel}` : `${cand.id} did not beat ${champ.id}`
     const gate: GateResult = {
       champion_id: champ.id,
       candidate_id: cand.id,

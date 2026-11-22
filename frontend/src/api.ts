@@ -1,4 +1,4 @@
-import type { AppState, ChatEvent } from './types'
+import type { AppState, ChatEvent, UseCase } from './types'
 import { mockApi } from './mock'
 
 export class ApiError extends Error {}
@@ -26,16 +26,17 @@ async function request<T>(method: 'GET' | 'POST', path: string): Promise<T> {
 
 /** Opens the chat stream. Calls onEvent for every event (including the final `done`).
  *  Returns a function that closes the stream. */
-export type StreamFn = (message: string, onEvent: (ev: ChatEvent) => void) => () => void
+export type StreamFn = (usecase: string, message: string, onEvent: (ev: ChatEvent) => void) => () => void
 
 export interface Api {
-  getState(): Promise<AppState>
-  reset(): Promise<AppState>
+  listUsecases(): Promise<UseCase[]>
+  getState(usecase: string): Promise<AppState>
+  reset(usecase: string): Promise<AppState>
   stream: StreamFn
 }
 
-const realStream: StreamFn = (message, onEvent) => {
-  const es = new EventSource(`/api/chat/stream?message=${encodeURIComponent(message)}`)
+const realStream: StreamFn = (usecase, message, onEvent) => {
+  const es = new EventSource(`/api/chat/stream?usecase=${encodeURIComponent(usecase)}&message=${encodeURIComponent(message)}`)
   let finished = false
   const close = () => {
     finished = true
@@ -62,8 +63,9 @@ const realStream: StreamFn = (message, onEvent) => {
 }
 
 const realApi: Api = {
-  getState: () => request('GET', '/api/state'),
-  reset: () => request('POST', '/api/reset'),
+  listUsecases: () => request('GET', '/api/usecases'),
+  getState: (uc) => request('GET', `/api/state?usecase=${encodeURIComponent(uc)}`),
+  reset: (uc) => request('POST', `/api/reset?usecase=${encodeURIComponent(uc)}`),
   stream: realStream,
 }
 

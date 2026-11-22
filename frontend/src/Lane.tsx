@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { ArrowRight, ChevronRight, Lightbulb, MessageSquareReply, Zap } from 'lucide-react'
 import { isEvo, type Item, type LaneState } from './laneState'
 import type { Ledger, Lesson } from './types'
-import { compactInput, humanize, money, pretty } from './format'
+import { compactInput, pretty } from './format'
 import { Diff } from './Diff'
 import { ErrorText, Pill, Spinner } from './ui'
 import { Circled, Connector, Hovering, Mark, Node, SketchBox } from './sketch'
@@ -206,7 +206,7 @@ function ReplyRow({ item, typer }: { item: Of<'reply'>; typer: Typer }) {
       <Node />
       <button className="reply-row hand" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <MessageSquareReply size={16} />
-        <span>{typer.t('Replied to customer')}</span>
+        <span>{typer.t('Sent the final reply')}</span>
         <ChevronRight size={15} className={`chev ${open ? 'chev-open' : ''}`} />
       </button>
       {open && <p className="reply-text hand">{item.text}</p>}
@@ -216,7 +216,7 @@ function ReplyRow({ item, typer }: { item: Of<'reply'>; typer: Typer }) {
 
 function ChecksCard({ item, typer: t }: { item: Of<'checks'>; typer: Typer }) {
   if (item.passed === null) {
-    return <div className="checks-card checks-null hand">{t.t('No order referenced, nothing to judge.')}</div>
+    return <div className="checks-card checks-null hand">{t.t('Nothing to judge: no known record was referenced.')}</div>
   }
   const failed = item.checks.find((c) => !c.passed)
   const head = failed ? (
@@ -250,31 +250,35 @@ function ChecksCard({ item, typer: t }: { item: Of<'checks'>; typer: Typer }) {
   )
 }
 
+/** Generic end-state card: facts, the items the hidden automation may duplicate, and a total. */
 function LedgerView({ ledger: l, compact }: { ledger: Ledger; compact?: boolean }) {
-  const total = l.refunds.reduce((s, r) => s + r.amount, 0)
-  const over = total > l.amount
   return (
     <div className={`ledger fade-in ${compact ? 'ledger-compact' : ''}`}>
       {!compact && (
-        <div className="ledger-top">
-          <span className="mono">{l.order_id}</span>
-          <span>
-            {money(l.amount, l.currency)} · {humanize(l.order_status_before)} → {humanize(l.order_status_after)}
-          </span>
-        </div>
+        <>
+          <div className="ledger-subject mono">{l.subject}</div>
+          {l.facts.map((f, i) => (
+            <div key={i} className="ledger-fact">
+              <span className="muted">{f.label}</span>
+              <span>{f.value}</span>
+            </div>
+          ))}
+        </>
       )}
-      {l.refunds.map((r) => (
-        <div key={r.refund_id} className={`ledger-refund ${over ? 'text-fail' : ''}`}>
-          <span className="mono">{r.refund_id}</span>
-          <span>{money(r.amount, l.currency)}</span>
-          <span className="mono small">
-            by {over && r.initiated_by !== 'agent' ? <Circled>{r.initiated_by}</Circled> : r.initiated_by}
-          </span>
-        </div>
-      ))}
-      <div className={`ledger-total ${over ? 'text-fail' : ''}`}>
-        Refunded <strong>{money(total, l.currency)}</strong>
-        {l.refunds.length > 1 && ` · ${l.refunds.length} refunds`}
+      {l.items.length > 0 && (
+        <>
+          {!compact && <div className="ledger-items-label">{l.items_label}</div>}
+          {l.items.map((it) => (
+            <div key={it.id} className={`ledger-item ${it.flagged ? 'text-fail' : ''}`}>
+              {!compact && <span className="mono">{it.id}</span>}
+              <span>{it.text}</span>
+              <span className="mono small">by {it.flagged ? <Circled>{it.by}</Circled> : it.by}</span>
+            </div>
+          ))}
+        </>
+      )}
+      <div className={`ledger-total ${l.total.bad ? 'text-fail' : ''}`}>
+        {l.total.label} <strong>{l.total.value}</strong>
       </div>
     </div>
   )

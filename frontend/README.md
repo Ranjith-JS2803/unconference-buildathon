@@ -20,4 +20,5 @@ npm run build
 
 - Types: `src/types.ts` · API + SSE client: `src/api.ts` · mock: `src/mock.ts` (only with `VITE_MOCK=1`)
 - Stream state: `src/laneState.ts` · writing queue: `src/writing.tsx` · lanes: `src/Lane.tsx` · chat: `src/Chat.tsx`
+- Use-case picker and info sheet: `src/UseCases.tsx` (every API call passes `?usecase=<id>`)
 - Explainer: `src/HowItWorks.tsx` · pencil strokes: `src/sketch.tsx` · styles: `src/styles.css`

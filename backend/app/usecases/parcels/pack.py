@@ -105,7 +105,7 @@ META: dict[str, Any] = {
         "Customer notified exactly once",
     ],
     "seed_cases": [c["title"] for c in SEED_CASES],
-    "queries": [{"label": t["customer_message"], "message": t["customer_message"]} for t in TICKETS],
+    "queries": [{"id": t["id"], "label": t["customer_message"], "message": t["customer_message"]} for t in TICKETS],
 }
 
 _CATALOG: dict[str, dict[str, Any]] = {t["seed"]["shipment_id"]: t["seed"] for t in TICKETS}
