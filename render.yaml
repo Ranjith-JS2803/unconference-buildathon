@@ -7,7 +7,7 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     plan: starter            # paid, never sleeps. Use "free" to try it out (sleeps after 15 min idle).
-    region: oregon           # change to frankfurt / singapore / virginia / ohio to be nearer the venue
+    region: singapore        # nearest Render region to Bengaluru
     branch: main
     autoDeploy: true
     numInstances: 1          # state is in-process: keep exactly one instance
