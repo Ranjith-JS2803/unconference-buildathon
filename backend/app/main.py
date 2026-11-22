@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from .engine.evolver import EvolverError  # noqa: E402
 from .engine.service import Engine, EngineError  # noqa: E402
+from .usecases import DEFAULT, PACKS  # noqa: E402
 
 
 def describe_error(exc: BaseException) -> str:
@@ -43,16 +44,37 @@ def describe_error(exc: BaseException) -> str:
 app = FastAPI(title="Evolve: self-improving agents")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
 
-engine = Engine(describe_error)
+engines = {uid: Engine(pack, describe_error) for uid, pack in PACKS.items()}
+
+
+def _engine(usecase: str) -> Engine:
+    if usecase not in engines:
+        raise HTTPException(status_code=404, detail=f"Unknown use case '{usecase}'.")
+    return engines[usecase]
+
+
+async def _tools(pack) -> list[dict]:
+    from mcp import Client
+
+    async with Client(pack.build_server(pack.build_world(pack.empty_seed()))) as mcp:
+        listed = await mcp.list_tools()
+    return [{"name": t.name, "description": " ".join((t.description or "").split())} for t in listed.tools]
+
+
+@app.get("/api/usecases")
+async def usecases():
+    return [{**pack.META, "tools": await _tools(pack)} for pack in PACKS.values()]
 
 
 @app.get("/api/state")
-async def get_state():
-    return engine.public_state()
+async def get_state(usecase: str = DEFAULT):
+    return _engine(usecase).public_state()
 
 
 @app.get("/api/chat/stream")
-async def chat_stream(message: str):
+async def chat_stream(message: str, usecase: str = DEFAULT):
+    engine = _engine(usecase)
+
     async def events():
         async for event in engine.chat_stream(message):
             yield f"data: {json.dumps(event, default=str)}\n\n"
@@ -65,9 +87,9 @@ async def chat_stream(message: str):
 
 
 @app.post("/api/reset")
-async def reset():
+async def reset(usecase: str = DEFAULT):
     try:
-        return await engine.reset()
+        return await _engine(usecase).reset()
     except EngineError as e:
         raise HTTPException(status_code=409, detail=str(e))
 

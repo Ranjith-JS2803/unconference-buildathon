@@ -39,6 +39,7 @@ async def run_agent(system_prompt: str, task: str, mcp_server: Any, emit: Emit |
     """
     emit = emit or _no_emit
     steps: list[dict[str, Any]] = []
+    server_name = getattr(mcp_server, "name", "mcp")
 
     async with Client(mcp_server) as mcp:
         listed = await mcp.list_tools()
@@ -48,7 +49,7 @@ async def run_agent(system_prompt: str, task: str, mcp_server: Any, emit: Emit |
         ]
 
         async def call_tool(call_id: str, name: str, args: dict[str, Any]) -> tuple[str, bool]:
-            await emit({"type": "tool_call", "call_id": call_id, "server": "commerce", "tool": name, "input": args})
+            await emit({"type": "tool_call", "call_id": call_id, "server": server_name, "tool": name, "input": args})
             result = await mcp.call_tool(name, args)
             output = _tool_output(result)
             is_error = bool(result.is_error)

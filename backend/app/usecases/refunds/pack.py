@@ -1,4 +1,6 @@
-"""Commerce domain pack: everything the engine needs to know about this one agent.
+"""Use-case pack: order cancellation & refunds (e-commerce support).
+
+Everything the engine needs to know about this one agent.
 
 The engine (app/engine) is domain-agnostic. A domain pack supplies:
   - V1_PROMPT            the agent's starting system prompt
@@ -129,12 +131,36 @@ SEED_CASES: list[dict[str, Any]] = [
 ]
 
 
-# ---- chat: examples + order catalog ------------------------------------
-EXAMPLES: list[dict[str, Any]] = [
-    {"id": t["id"], "label": t["customer_message"], "message": t["customer_message"]}
-    for t in TICKETS
-    if t["id"] in ("T1", "T4")
-]
+# ---- metadata shown in the UI ------------------------------------------
+META: dict[str, Any] = {
+    "id": "refunds",
+    "name": "Order cancellation & refunds",
+    "domain": "E-commerce customer support",
+    "icon": "receipt",
+    "summary": "Cancels customer orders and refunds the payment.",
+    "agent_role": "ShopKart's order-support agent. It handles customer requests to cancel an order and get their money back.",
+    "mcp_server": "commerce",
+    "hidden_behavior": (
+        "When a card order paid through Gateway X is cancelled, the order system automatically asks the gateway "
+        "to refund it (an asynchronous webhook). The refund only shows up on the payment a little later."
+    ),
+    "expected_failure": (
+        "v1 follows the standard procedure: cancel the order, then call create_refund. Every tool call succeeds, "
+        "but on Gateway X orders the customer is refunded twice."
+    ),
+    "checks": [
+        "Order ends in the right state",
+        "Customer refunded the right amount",
+        "No duplicate refunds",
+        "Customer notified exactly once",
+    ],
+    "seed_cases": [c["title"] for c in SEED_CASES],
+    "queries": [
+        {"label": t["customer_message"], "message": t["customer_message"]}
+        for t in TICKETS
+        if t["id"] in ("T1", "T4")
+    ],
+}
 
 # Every order the chat knows about. Each chat run gets a fresh copy of just the order it mentions.
 _CATALOG: dict[str, dict[str, Any]] = {t["seed"]["order_id"]: t["seed"] for t in TICKETS}
@@ -266,15 +292,30 @@ def case_title(seed: dict[str, Any]) -> str:
 
 def ledger_view(world: World, seed: dict[str, Any]) -> dict[str, Any]:
     order, payment, before = _order_and_payment(world, seed)
+    active = [r for r in payment["refunds"] if r["status"] != "FAILED"]
+    refunded = sum(r["amount"] for r in active)
+    expected = payment["captured_amount"] if order["status"] == "cancelled" else 0
     return {
-        "order_id": order["order_id"],
-        "order_status_before": before["status"],
-        "order_status_after": order["status"],
-        "amount": payment["captured_amount"],
-        "currency": order["currency"],
-        "refunds": [
-            {k: r[k] for k in ("refund_id", "amount", "status", "initiated_by")} for r in payment["refunds"]
+        "subject": order["order_id"],
+        "facts": [
+            {"label": "Order", "value": f"{_inr(payment['captured_amount'])} · {before['status']} → {order['status']}"},
+            {"label": "Payment", "value": f"{payment['method']} · Gateway {payment['gateway']}"},
         ],
+        "items_label": "Refunds",
+        "items": [
+            {
+                "id": r["refund_id"],
+                "text": f"{_inr(r['amount'])} · {r['status']}",
+                "by": r["initiated_by"],
+                "flagged": r["initiated_by"] != "api",
+            }
+            for r in payment["refunds"]
+        ],
+        "total": {
+            "label": "Refunded",
+            "value": f"{_inr(refunded)} · {len(active)} refund{'s' if len(active) != 1 else ''}",
+            "bad": refunded != expected,
+        },
         "notifications": [
             {"notification_id": n["notification_id"], "message": n["message"]}
             for n in world.notifications

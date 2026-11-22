@@ -113,3 +113,55 @@ Typical timeline for "Cancel ORD-1024" on a fresh system: both lanes stream tool
 `async_effects`, then `checks` with passed=false on both. The baseline lane ends. The evolving lane continues:
 evolution_started → eval_case_added → diagnosing → candidate_proposed → gate_started → gate_case ×N →
 gate_result (promoted) → lane_done → done.
+
+---
+
+# v3 additions: multiple use cases (the framework is the product)
+
+The engine now hosts several **use cases** (pluggable packs: agent prompt + MCP tools + outcome checks + seed cases).
+Each use case has its own versions, eval set and lessons.
+
+## New route
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/usecases` | `UseCase[]` |
+
+```ts
+interface UseCase {
+  id: string;                 // "refunds" | "parcels"
+  name: string;               // "Order cancellation & refunds"
+  domain: string;             // "E-commerce customer support"
+  icon: string;               // a lucide icon name hint: "receipt" | "package"
+  summary: string;            // one line: what the agent does
+  agent_role: string;         // 1-2 sentences: who the agent is and what it handles
+  mcp_server: string;         // "commerce" | "logistics"
+  tools: { name: string; description: string }[];   // the MCP tools (accurately documented)
+  hidden_behavior: string;    // the integration quirk no tool description mentions
+  expected_failure: string;   // what v1 will get wrong and why
+  checks: string[];           // outcome-check labels (what "correct" means)
+  seed_cases: string[];       // titles of hand-written seed eval cases
+  queries: { label: string; message: string }[];    // recommended queries (2)
+}
+```
+
+## Changed routes: all take `?usecase=<id>` (default `refunds`)
+
+- `GET  /api/state?usecase=refunds` → `AppState` (+ `usecase: string`). `examples` = that use case's queries.
+- `GET  /api/chat/stream?usecase=refunds&message=...` → same SSE events as before.
+- `POST /api/reset?usecase=refunds` → `AppState` (resets only that use case).
+
+## Changed: `Ledger` is now generic (used in `checks` and `evolution_started` events)
+
+```ts
+interface Ledger {
+  subject: string;                                  // "ORD-1024" | "SHP-5521"
+  facts: { label: string; value: string }[];        // e.g. {label:"Order", value:"₹2,499 · placed → cancelled"}
+  items_label: string;                              // "Refunds" | "Replacement shipments"
+  items: { id: string; text: string; by: string; flagged: boolean }[];
+      // text e.g. "₹2,499 · PROCESSING"; by = who initiated ("api" = the agent, "order-system"/"swiftship" = hidden automation)
+      // flagged = this item was created by hidden automation (circle it)
+  total: { label: string; value: string; bad: boolean };  // e.g. {label:"Refunded", value:"₹4,998 · 2 refunds", bad:true}
+  notifications: { notification_id: string; message: string }[];
+}
+```
