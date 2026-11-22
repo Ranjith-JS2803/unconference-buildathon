@@ -1,0 +1,13 @@
+[project]
+name = "evolve-engine"
+version = "0.1.0"
+description = "Evolve: agents that learn from their own production failures"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic[mcp]>=2.12.0",
+    "fastapi>=0.165.0",
+    "mcp>=2.3.0",
+    "openai>=3.57.0",
+    "python-dotenv>=1.2.4",
+    "uvicorn[standard]>=0.54.0",
+]
