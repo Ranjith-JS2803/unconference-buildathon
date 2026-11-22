@@ -137,7 +137,6 @@ export function HowItWorks({ open, onClose, onTry }: { open: boolean; onClose: (
           </section>
         </div>
         <footer className="modal-foot">
-          <p className="control hand">The non-evolving agent on the left is the control group: same model, same tools, never learns.</p>
           <button ref={tryRef} className="btn btn-primary try-btn hand" onClick={onTry}>
             Got it, try an example <ArrowRight size={16} />
           </button>
