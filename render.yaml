@@ -1,0 +1,28 @@
+# Render Blueprint: one Docker web service serving the API + built frontend.
+# Dashboard -> New -> Blueprint -> pick this repo. Secrets (sync: false) are prompted on first create.
+services:
+  - type: web
+    name: evolve-demo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter            # paid, never sleeps. Use "free" to try it out (sleeps after 15 min idle).
+    region: oregon           # change to frankfurt / singapore / virginia / ohio to be nearer the venue
+    branch: main
+    autoDeploy: true
+    numInstances: 1          # state is in-process: keep exactly one instance
+    healthCheckPath: /api/state
+    envVars:
+      - key: LLM_PROVIDER
+        sync: false
+      - key: OPENAI_COMPAT_BASE_URL
+        sync: false
+      - key: OPENAI_COMPAT_API_KEY
+        sync: false
+      - key: AGENT_MODEL
+        sync: false
+      - key: EVOLVER_MODEL
+        sync: false
+      # Optional: only if using the Claude API directly instead of the gateway
+      # - key: ANTHROPIC_API_KEY
+      #   sync: false
