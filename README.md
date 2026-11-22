@@ -7,6 +7,9 @@ debug the trace, rewrite the prompt and hope nothing else broke.
 It reads the failure, fixes itself and proves it got better before the fix goes live, with no human
 in the loop.
 
+**Live demo: https://unconference-buildathon.onrender.com**: pick a use case in the chat, send one of
+the suggested queries, and watch the evolving agent catch its own failure, fix itself and get promoted.
+
 ## The problem it solves
 
 The hardest agent failures produce **no errors**. Every tool call succeeds, every API is documented
