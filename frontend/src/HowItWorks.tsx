@@ -11,33 +11,52 @@ const STEPS: { title: string; text: string; tone?: 'fail' | 'warn' | 'pass' }[] 
   { title: 'Promote', text: 'Ship only with the failure fixed and zero regressions. Otherwise the agent revises its fix and tries again. Lessons accumulate; nothing learned is lost.', tone: 'pass' },
 ]
 
-const SIZE = 336 // px, circle diagram
-const R = 126 // ring radius
-const N = STEPS.length
-const angle = (i: number) => -90 + (i * 360) / N // node i, clockwise from the top
-const at = (deg: number, r = R) => ({ x: SIZE / 2 + r * Math.cos((deg * Math.PI) / 180), y: SIZE / 2 + r * Math.sin((deg * Math.PI) / 180) })
-
-function LoopCircle() {
+/** Hand-drawn arrow. `dir` rotates it. */
+function Arrow({ dir }: { dir: 'right' | 'left' | 'down' }) {
   return (
-    <div className="loop-circle" style={{ width: SIZE, height: SIZE }} aria-hidden>
-      <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
-        <circle className="loop-ring" cx={SIZE / 2} cy={SIZE / 2} r={R} />
-        {STEPS.map((_, i) => {
-          const a = angle(i + 0.5)
-          const p = at(a)
-          return <path key={i} className="loop-chevron" d="M-5 -7 L4 0 L-5 7" transform={`translate(${p.x} ${p.y}) rotate(${a + 90})`} />
-        })}
-      </svg>
-      <div className="loop-center hand">the loop</div>
-      {STEPS.map((s, i) => {
-        const p = at(angle(i))
-        return (
-          <div key={s.title} className={`loop-node ${s.tone ? `node-${s.tone}` : ''}`} style={{ left: p.x, top: p.y, animationDelay: `${i * 0.07}s` }}>
-            <span className="loop-node-num">{i + 1}</span>
-            <span className="loop-node-label hand">{s.title}</span>
-          </div>
-        )
-      })}
+    <svg className={`hand-arrow arrow-${dir}`} viewBox="0 0 48 24" aria-hidden>
+      <path className="draw" pathLength={1} d="M3 13 C 14 9, 28 15, 42 11" />
+      <path className="draw draw-2" pathLength={1} d="M34 5 C 37 8, 40 10, 43 11 C 39 13, 36 16, 34 19" />
+    </svg>
+  )
+}
+
+function Step({ n, cls }: { n: number; cls: string }) {
+  const s = STEPS[n - 1]
+  return (
+    <div className={`loop-step ${cls} ${s.tone ? `step-${s.tone}` : ''}`} style={{ animationDelay: `${n * 0.06}s` }}>
+      <div className="loop-head hand">
+        <span className="loop-num">{n}</span> {s.title}
+      </div>
+      <p className="hand">{s.text}</p>
+    </div>
+  )
+}
+
+/** Snake flowchart: 1 → 2 → 3 → 4, down, 7 ← 6 ← 5, and a repeat arrow back to 1. */
+function LoopFlow() {
+  return (
+    <div className="loop">
+      <Step n={1} cls="g-s1" />
+      <span className="g-a12"><Arrow dir="right" /></span>
+      <Step n={2} cls="g-s2" />
+      <span className="g-a23"><Arrow dir="right" /></span>
+      <Step n={3} cls="g-s3" />
+      <span className="g-a34"><Arrow dir="right" /></span>
+      <Step n={4} cls="g-s4" />
+      <span className="g-a45"><Arrow dir="down" /></span>
+      <Step n={5} cls="g-s5" />
+      <span className="g-a56"><Arrow dir="left" /></span>
+      <Step n={6} cls="g-s6" />
+      <span className="g-a67"><Arrow dir="left" /></span>
+      <Step n={7} cls="g-s7" />
+      <span className="g-back" aria-hidden>
+        <svg viewBox="0 0 60 120" preserveAspectRatio="none">
+          <path d="M55 108 C 25 110, 8 95, 10 60 C 11 35, 18 20, 30 10" />
+          <path d="M20 14 C 24 12, 27 11, 31 9 C 31 13, 32 17, 33 21" />
+        </svg>
+        <span className="hand">repeat</span>
+      </span>
     </div>
   )
 }
@@ -95,18 +114,8 @@ export function HowItWorks({ open, onClose, onTry }: { open: boolean; onClose: (
             </p>
           </section>
 
-          <section className="loop-wrap">
-            <LoopCircle />
-            <ol className="loop-list">
-              {STEPS.map((s, i) => (
-                <li key={s.title} className={s.tone ? `li-${s.tone}` : ''}>
-                  <span className="loop-list-num">{i + 1}</span>
-                  <span className="hand">
-                    <strong>{s.title}:</strong> {s.text}
-                  </span>
-                </li>
-              ))}
-            </ol>
+          <section aria-label="The loop">
+            <LoopFlow />
           </section>
 
           <section className="plug">
