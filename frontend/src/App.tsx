@@ -1,16 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Activity, Crown, FlaskConical, GitBranch, Info, RotateCcw, Zap } from 'lucide-react'
-import type { AppState, ChatEvent, Lane } from './types'
+import type { AppState, ChatEvent, Lane, UseCase } from './types'
 import { api, errMsg, IS_MOCK } from './api'
 import { emptyLanes, lanesReduce, type Lanes } from './laneState'
 import { LaneColumn, revealedOutcome } from './Lane'
 import { useWriter } from './writing'
 import { Chat, type Turn } from './Chat'
 import { HowItWorks } from './HowItWorks'
+import { UcIcon, UseCaseInfo } from './UseCases'
 import { Drawer, ErrorText, Pill, StatusPill } from './ui'
 import { time } from './format'
 
+const UC_KEY = 'evolve.usecase'
+function readUc(): string | null {
+  try {
+    return localStorage.getItem(UC_KEY)
+  } catch {
+    return null
+  }
+}
+function writeUc(id: string) {
+  try {
+    localStorage.setItem(UC_KEY, id)
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 export default function App() {
+  const [usecases, setUsecases] = useState<UseCase[]>([])
+  const [ucId, setUcId] = useState<string | null>(readUc)
+  const [picking, setPicking] = useState(() => readUc() === null)
+  const [infoUc, setInfoUc] = useState<UseCase | null>(null)
+  const [runSeq, setRunSeq] = useState(0)
+  const ucRef = useRef(ucId)
+  ucRef.current = ucId
   const [state, setState] = useState<AppState | null>(null)
   const [lanes, setLanes] = useState<Lanes>(emptyLanes)
   const [turns, setTurns] = useState<Turn[]>([])
@@ -23,11 +47,15 @@ export default function App() {
   const [howOpen, setHowOpen] = useState(false)
   const closeChat = useCallback(() => setChatOpen(false), [])
   const closeHow = useCallback(() => setHowOpen(false), [])
+  const closeInfo = useCallback(() => setInfoUc(null), [])
   const closeStream = useRef<(() => void) | null>(null)
 
   const refresh = useCallback(async () => {
+    const uc = ucRef.current
+    if (!uc) return
     try {
-      const s = await api.getState()
+      const s = await api.getState(uc)
+      if (ucRef.current !== uc) return
       setState(s)
       setLiveChampion(null)
       setError(null)
@@ -37,9 +65,40 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    refresh()
+    api
+      .listUsecases()
+      .then((list) => {
+        setUsecases(list)
+        // A stored use case that no longer exists sends the viewer back to the picker.
+        if (ucRef.current && !list.some((u) => u.id === ucRef.current)) {
+          setUcId(null)
+          setPicking(true)
+        }
+      })
+      .catch((e) => setError(errMsg(e)))
     return () => closeStream.current?.()
-  }, [refresh])
+  }, [])
+
+  useEffect(() => {
+    setState(null)
+    refresh()
+  }, [ucId, refresh])
+
+  function chooseUsecase(id: string) {
+    closeStream.current?.()
+    closeStream.current = null
+    writeUc(id)
+    setUcId(id)
+    setPicking(false)
+    setInfoUc(null)
+    setLanes(emptyLanes())
+    setTurns([])
+    setStreaming(false)
+    setLiveChampion(null)
+    setError(null)
+    setRunSeq((n) => n + 1)
+    setChatOpen(true)
+  }
 
   const updateTurn = (fn: (t: Turn) => Turn) =>
     setTurns((ts) => (ts.length ? [...ts.slice(0, -1), fn(ts[ts.length - 1])] : ts))
@@ -80,21 +139,24 @@ export default function App() {
   }
 
   function send(text: string) {
-    if (streaming) return
+    if (streaming || !ucId) return
     setError(null)
     setLanes(emptyLanes())
     setTurns((ts) => [...ts, { id: Date.now(), text, replies: { baseline: {}, evolving: {} } }])
     setStreaming(true)
+    setRunSeq((n) => n + 1)
     setChatOpen(false)
-    closeStream.current = api.stream(text, onEvent)
+    closeStream.current = api.stream(ucId, text, onEvent)
   }
 
   async function reset() {
+    if (!ucId) return
     closeStream.current?.()
     closeStream.current = null
     setResetting(true)
     try {
-      setState(await api.reset())
+      setState(await api.reset(ucId))
+      setRunSeq((n) => n + 1)
       setLanes(emptyLanes())
       setTurns([])
       setStreaming(false)
@@ -109,7 +171,8 @@ export default function App() {
 
 
 
-  const runKey = turns.length
+  const runKey = runSeq
+  const usecase = usecases.find((u) => u.id === ucId) ?? null
   const posB = useWriter(lanes.baseline.items, !streaming, runKey)
   const posE = useWriter(lanes.evolving.items, !streaming, runKey)
   const liveOutcome = { baseline: revealedOutcome(lanes.baseline.items, posB), evolving: revealedOutcome(lanes.evolving.items, posE) }
@@ -138,6 +201,17 @@ export default function App() {
             <h1 className="hand">Evolve</h1>
             <p className="tagline hand">Agents that learn from their own production failures</p>
           </div>
+          {usecase && (
+            <span className="uc-pill">
+              <UcIcon icon={usecase.icon} size={15} />
+              <span className="hand">
+                Use case: <strong>{usecase.name}</strong>
+              </span>
+              <button className="info-btn" onClick={() => setInfoUc(usecase)} aria-label={`About ${usecase.name}`} title="What is in this use-case pack?">
+                <Info size={14} />
+              </button>
+            </span>
+          )}
         </div>
         <div className="topbar-right">
           {IS_MOCK && <Pill tone="warn">mock API</Pill>}
@@ -209,7 +283,13 @@ export default function App() {
         onOpen={() => setChatOpen(true)}
         onClose={closeChat}
         onSend={send}
+        usecases={usecases}
+        usecase={picking ? null : usecase}
+        onPick={chooseUsecase}
+        onChangeUsecase={() => setPicking(true)}
+        onInfo={setInfoUc}
       />
+      <UseCaseInfo uc={infoUc} onClose={closeInfo} onUse={chooseUsecase} current={ucId} />
       <HowItWorks open={howOpen} onClose={closeHow} />
 
       <Drawer open={drawer === 'evals'} onClose={() => setDrawer(null)} title={`Eval set (${state?.eval_cases.length ?? 0})`}>

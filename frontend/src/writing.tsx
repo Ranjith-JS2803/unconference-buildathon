@@ -25,11 +25,11 @@ export function segmentsOf(it: Item): string[] {
     case 'tool':
       return [it.tool, compactInput(it.input)]
     case 'reply':
-      return ['Replied to customer']
+      return ['Sent the final reply']
     case 'effect':
       return [it.text]
     case 'checks': {
-      if (it.passed === null) return ['No order referenced, nothing to judge.']
+      if (it.passed === null) return ['Nothing to judge: no known record was referenced.']
       const failed = it.checks.find((c) => !c.passed)
       const head = failed ? [it.allToolsOk ? 'All tool calls succeeded — but' : 'Outcome check failed', failed.detail] : ['All checks passed']
       return [...head, ...it.checks.flatMap((c) => [c.label, c.detail])]

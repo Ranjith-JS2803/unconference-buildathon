@@ -8,7 +8,8 @@ When the evolving agent fails its outcome checks, the engine runs the evolution 
 own (autopilot): capture the failure as an eval case → the agent diagnoses and proposes a new
 prompt → gate (champion vs candidate on every eval case) → promote or reject.
 
-Nothing in this module knows about orders or refunds; that lives in the domain pack.
+Nothing in this module knows about any business domain; that lives in a use-case pack
+(see app/usecases/). One Engine instance runs one use case.
 """
 
 from __future__ import annotations
@@ -24,10 +25,9 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from mcp import Client
 
-from ..domain import commerce as domain
 from . import agent, evolver
 
-DATA_FILE = Path(os.getenv("DATA_FILE", Path(__file__).resolve().parents[2] / "data" / "state.json"))
+DATA_DIR = Path(os.getenv("DATA_DIR", Path(__file__).resolve().parents[2] / "data"))
 GATE_CONCURRENCY = int(os.getenv("GATE_CONCURRENCY", "8"))
 AUTOPILOT = os.getenv("AUTOPILOT", "true").lower() in ("1", "true", "yes", "on")
 MAX_ATTEMPTS = int(os.getenv("MAX_EVOLVE_ATTEMPTS", "3"))
@@ -48,7 +48,9 @@ class EngineError(Exception):
 
 
 class Engine:
-    def __init__(self, describe_error: Callable[[BaseException], str] = str) -> None:
+    def __init__(self, pack: Any, describe_error: Callable[[BaseException], str] = str) -> None:
+        self.pack = pack
+        self.data_file = DATA_DIR / f"state-{pack.META['id']}.json"
         self._lock = asyncio.Lock()
         self._evolve_lock = asyncio.Lock()
         self.describe_error = describe_error
@@ -61,13 +63,13 @@ class Engine:
             "baseline_id": "v1",
             "champion_id": "v1",
             "versions": [
-                {"id": "v1", "status": "champion", "parent_id": None, "prompt": domain.V1_PROMPT, "created_at": _now()}
+                {"id": "v1", "status": "champion", "parent_id": None, "prompt": self.pack.V1_PROMPT, "created_at": _now()}
             ],
             "eval_cases": [],
             "runs": {},
             "counters": {"run": 0, "case": 0, "version": 1},
         }
-        for case in domain.SEED_CASES:
+        for case in self.pack.SEED_CASES:
             state["counters"]["case"] += 1
             state["eval_cases"].append(
                 {
@@ -82,19 +84,19 @@ class Engine:
         return state
 
     def _load(self) -> dict[str, Any] | None:
-        if DATA_FILE.exists():
+        if self.data_file.exists():
             try:
-                state = json.loads(DATA_FILE.read_text())
+                state = json.loads(self.data_file.read_text())
                 return state if "baseline_id" in state else None  # ignore pre-v2 state files
             except json.JSONDecodeError:
                 return None
         return None
 
     def _save(self) -> None:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = DATA_FILE.with_suffix(".tmp")
+        self.data_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.data_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.state, indent=2))
-        tmp.replace(DATA_FILE)
+        tmp.replace(self.data_file)
 
     async def reset(self) -> dict[str, Any]:
         if self._evolve_lock.locked():
@@ -119,7 +121,8 @@ class Engine:
             "evolving_now": self._evolve_lock.locked(),
             "versions": self.state["versions"],
             "eval_cases": [_public_case(c) for c in self.state["eval_cases"]],
-            "examples": domain.EXAMPLES,
+            "usecase": self.pack.META["id"],
+            "examples": self.pack.META["queries"],
             "lessons": self._lessons(self.state["champion_id"]),
         }
 
@@ -153,15 +156,15 @@ class Engine:
             {"type": "run_started", "version_id": version["id"], "run_id": run_id, "lessons": self._lessons(version["id"])}
         )
 
-        world = domain.build_world(seed)
-        result = await agent.run_agent(version["prompt"], task, domain.build_server(world), emit)
+        world = self.pack.build_world(seed)
+        result = await agent.run_agent(version["prompt"], task, self.pack.build_server(world), emit)
 
         # Let asynchronous side effects (e.g. webhooks) land before judging the outcome.
         for description in world.settle():
             await emit({"type": "async_effects", "description": description})
 
         judged = seed.get("order_id") is not None
-        checks = domain.run_checks(world, seed) if judged else []
+        checks = self.pack.run_checks(world, seed) if judged else []
         run = {
             "id": run_id,
             "version_id": version["id"],
@@ -171,7 +174,7 @@ class Engine:
             "final_text": result["final_text"],
             "checks": checks,
             "passed": all(c["passed"] for c in checks) if judged else None,
-            "ledger": domain.ledger_view(world, seed) if judged else None,
+            "ledger": self.pack.ledger_view(world, seed) if judged else None,
             "end_state": world.ledger(),
             "created_at": _now(),
             **tags,
@@ -190,7 +193,7 @@ class Engine:
             return
 
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        seed = domain.seed_for_message(message) or domain.empty_seed()
+        seed = self.pack.seed_for_message(message) or self.pack.empty_seed()
 
         def lane_emit(lane: str) -> Emit:
             async def emit(event: dict[str, Any]) -> None:
@@ -289,14 +292,14 @@ class Engine:
 
     async def _capture_failure(self, run: dict[str, Any]) -> dict[str, Any] | None:
         """A failed production run becomes an eval case (once per kind of failure)."""
-        sig = domain.case_signature(run["seed"])
+        sig = self.pack.case_signature(run["seed"])
         async with self._lock:
-            if any(domain.case_signature(c["seed"]) == sig for c in self.state["eval_cases"]):
+            if any(self.pack.case_signature(c["seed"]) == sig for c in self.state["eval_cases"]):
                 return None
             self.state["counters"]["case"] += 1
             case = {
                 "id": f"case-{self.state['counters']['case']:03d}",
-                "title": domain.case_title(run["seed"]),
+                "title": self.pack.case_title(run["seed"]),
                 "origin": "auto",
                 "source_run_id": run["id"],
                 "task": run["task"],
@@ -339,7 +342,7 @@ class Engine:
 
     async def _propose(self, run: dict[str, Any], rejected: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         parent = self._version(run["version_id"])
-        async with Client(domain.build_server(domain.build_world(run["seed"]))) as mcp:
+        async with Client(self.pack.build_server(self.pack.build_world(run["seed"]))) as mcp:
             listed = await mcp.list_tools()
         tools = [{"name": t.name, "description": t.description} for t in listed.tools]
 
@@ -349,7 +352,7 @@ class Engine:
             run,
             run["end_state"],
             self.state["eval_cases"],
-            {c["id"]: domain.case_facts(c["seed"]) for c in self.state["eval_cases"]},
+            {c["id"]: self.pack.case_facts(c["seed"]) for c in self.state["eval_cases"]},
             [{k: v for k, v in r.items() if k != "summary"} for r in (rejected or [])],
         )
         new_prompt = proposal["new_prompt"].strip()
@@ -413,8 +416,8 @@ class Engine:
         target_ids: list[str] = []
         source = self.state["runs"].get(candidate.get("source_run_id") or "")
         if source:
-            sig = domain.case_signature(source["seed"])
-            target_ids = [c["id"] for c in cases if domain.case_signature(c["seed"]) == sig]
+            sig = self.pack.case_signature(source["seed"])
+            target_ids = [c["id"] for c in cases if self.pack.case_signature(c["seed"]) == sig]
         unfixed = [r["case_id"] for r in results if r["case_id"] in target_ids and not r["candidate"]["passed"]]
 
         champ_score = sum(r["champion"]["passed"] for r in results)

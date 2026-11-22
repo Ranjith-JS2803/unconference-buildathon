@@ -5,9 +5,13 @@ export type Lane = "baseline" | "evolving";
 export interface DiffLine { op: "+" | "-" | " "; text: string }
 export interface Check { name: string; label: string; passed: boolean; detail: string }
 export interface Refund { refund_id: string; amount: number; status: string; initiated_by: string }
+export interface LedgerItem { id: string; text: string; by: string; flagged: boolean }
 export interface Ledger {
-  order_id: string; order_status_before: string; order_status_after: string;
-  amount: number; currency: string; refunds: Refund[];
+  subject: string;                                  // "ORD-1024" | "SHP-5521"
+  facts: { label: string; value: string }[];
+  items_label: string;                              // "Refunds" | "Replacement shipments"
+  items: LedgerItem[];                              // flagged = created by hidden automation
+  total: { label: string; value: string; bad: boolean };
   notifications: { notification_id: string; message: string }[];
 }
 export interface EvalCase { id: string; title: string; origin: "seed" | "auto"; source_run_id?: string; task: string; created_at: string }
@@ -42,6 +46,23 @@ export interface AppState {
   eval_cases: EvalCase[];       // oldest first
   examples: Example[];
   lessons: Lesson[];            // lessons the current champion has learned, oldest first
+  usecase?: string;
+}
+
+export interface UseCase {
+  id: string;
+  name: string;
+  domain: string;
+  icon: string;               // lucide icon name hint: "receipt" | "package"
+  summary: string;
+  agent_role: string;
+  mcp_server: string;
+  tools: { name: string; description: string }[];
+  hidden_behavior: string;
+  expected_failure: string;
+  checks: string[];
+  seed_cases: string[];
+  queries: { label: string; message: string }[];
 }
 
 export type GateCaseRef = { case_id: string; title: string; origin: "seed" | "auto" }
@@ -51,7 +72,7 @@ export type ChatEvent =
   | { type: "run_started";  lane: Lane; version_id: string; run_id: string; lessons?: Lesson[] }
   | { type: "agent_thinking"; lane: Lane }
   | { type: "agent_text";   lane: Lane; text: string }
-  | { type: "tool_call";    lane: Lane; call_id: string; server: "commerce"; tool: string; input: Record<string, unknown> }
+  | { type: "tool_call";    lane: Lane; call_id: string; server: string; tool: string; input: Record<string, unknown> }
   | { type: "tool_result";  lane: Lane; call_id: string; tool: string; output: unknown; is_error: boolean }
   | { type: "agent_reply";  lane: Lane; text: string }
   | { type: "async_effects"; lane: Lane; description: string }

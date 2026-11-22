@@ -83,6 +83,9 @@ export function HowItWorks({ open, onClose }: { open: boolean; onClose: () => vo
                 <li>Outcome checks</li>
                 <li>Optional seed cases</li>
               </ul>
+              <p className="plug-note hand">
+                Use-case pack = agent prompt + MCP server + outcome checks + seed cases. Two packs ship with this demo.
+              </p>
             </div>
             <div>
               <div className="plug-title hand text-pass">Evolve does the rest</div>
