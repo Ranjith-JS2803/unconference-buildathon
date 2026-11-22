@@ -44,9 +44,27 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [drawer, setDrawer] = useState<'evals' | 'versions' | null>(null)
   const [chatOpen, setChatOpen] = useState(true)
-  const [howOpen, setHowOpen] = useState(false)
+  // The explainer opens first on every load (intentionally not remembered).
+  const [howOpen, setHowOpen] = useState(true)
   const closeChat = useCallback(() => setChatOpen(false), [])
-  const closeHow = useCallback(() => setHowOpen(false), [])
+  const focusChat = useCallback(() => {
+    // Wait for the pop-up to become interactive (its inert flag is cleared in an effect).
+    setTimeout(() => {
+      const target =
+        document.querySelector<HTMLElement>('.chat-pop.open input:not([disabled]), .chat-pop.open .uc-main, .chat-pop.open .suggestion') ??
+        document.querySelector<HTMLElement>('.chat-dock.show')
+      target?.focus()
+    }, 60)
+  }, [])
+  const closeHow = useCallback(() => {
+    setHowOpen(false)
+    focusChat()
+  }, [focusChat])
+  const tryExample = useCallback(() => {
+    setHowOpen(false)
+    setChatOpen(true)
+    focusChat()
+  }, [focusChat])
   const closeInfo = useCallback(() => setInfoUc(null), [])
   const closeStream = useRef<(() => void) | null>(null)
 
@@ -290,7 +308,7 @@ export default function App() {
         onInfo={setInfoUc}
       />
       <UseCaseInfo uc={infoUc} onClose={closeInfo} onUse={chooseUsecase} current={ucId} />
-      <HowItWorks open={howOpen} onClose={closeHow} />
+      <HowItWorks open={howOpen} onClose={closeHow} onTry={tryExample} />
 
       <Drawer open={drawer === 'evals'} onClose={() => setDrawer(null)} title={`Eval set (${state?.eval_cases.length ?? 0})`}>
         <ErrorText error={error} />
